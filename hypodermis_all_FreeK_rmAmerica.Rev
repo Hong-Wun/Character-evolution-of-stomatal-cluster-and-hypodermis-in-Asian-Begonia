@@ -1,0 +1,107 @@
+#The script is from the turtorial of ancestral_state_estimation of the Revbayes 
+#(https://revbayes.github.io/tutorials/morph_ase/ase_mammals.html, authors:  Sebastian Höhna) 
+#with some modifications
+
+#######################
+# Reading in the Data #
+#######################
+
+##parameters
+morphology = "/Users/chenhongwen/Documents/Lab/ancestral_state_estimation/hypodermis_all_FreeK/hypodermis_all.nex"
+backbone = "/Users/chenhongwen/Documents/Lab/ancestral_state_estimation/hypodermis_all_FreeK/time_tree_rmAmerica.nex"
+output = "/Users/chenhongwen/Documents/Lab/ancestral_state_estimation/hypodermis_all_FreeK/output/hypodermis_rm_America_FreeK"
+
+# Import the morphological character matrix #
+# this file contains only the taxa for which morphological characters are available #
+morpho <- readDiscreteCharacterData(morphology)
+NUM_STATES = 2
+
+# Create some vector for the moves and monitors of this analysis
+moves    = VectorMoves()
+monitors = VectorMonitors()
+
+
+
+##############
+# Tree model #
+##############
+
+# Here we use a fixed tree topology of mammals on a family level sampling
+# Note that the readTrees function always returns a vector of trees, 
+# so we simple take the first tree
+phylogeny <- readTrees(backbone)[1]
+
+
+
+###########################################
+# freeK substitution model #
+###########################################
+
+#A good guess might be that 10 events happened along the tree, so the rate should be the tree-length divided by 10.
+rate_pr := phylogeny.treeLength() / 10
+
+# Specify a prior on the rate of morphological evolution
+# Moves on the parameters to the Gamma distribution.
+NUM_RATES = NUM_STATES * (NUM_STATES-1)
+for ( i in 1:NUM_RATES ) {
+    rate[i] ~ dnExp(rate_pr)
+    moves.append( mvScale( rate[i], weight=2 ) )
+}
+
+# Create the Q matrix. These data are binary, so we initialize the Jukes-Cantor matrix with three states
+Q_morpho := fnFreeK(rate, rescale=false)
+
+#Specify a prior on the root state frequencies
+rf_prior <- [1,1]
+rf ~ dnDirichlet( rf_prior )
+moves.append( mvBetaSimplex( rf, weight=2 ) )
+moves.append( mvDirichletSimplex( rf, weight=2 ) )
+
+# Combine all of our elements into a CTMC.
+phyMorpho ~ dnPhyloCTMC(tree=phylogeny, rootFrequencies=rf, Q=Q_morpho, type="Standard")
+phyMorpho.clamp(morpho)
+
+
+
+########
+# MCMC #
+########
+
+# initialize the model object #
+mymodel = model(phylogeny)
+# Create a vector of monitors #
+# 1. for the full model #
+monitors.append( mnModel(filename=output+".log", printgen=1) )
+# 2. and a few select parameters to be printed to the screen #
+monitors.append( mnScreen(printgen=100) )
+# 3. add an ancestral state monitor
+monitors.append( mnJointConditionalAncestralState(tree=phylogeny,
+                                                  ctmc=phyMorpho,
+                                                  filename=output+".states.txt",
+                                                  type="Standard",
+                                                  printgen=1,
+                                                  withTips=true,
+                                                  withStartStates=false) )
+
+# Initialize the MCMC object #
+mymcmc = mcmc(mymodel, monitors, moves, nruns = 2, combine = "mixed")
+
+# Run the MCMC #
+mymcmc.run(generations = 10000, tuningInterval = 200)
+
+# check the performance of the MCMC/moves
+mymcmc.operatorSummary()
+
+
+# Read in the tree trace and construct the ancestral states (ASE) #
+anc_states = readAncestralStateTrace(output+".states.txt")
+anc_tree = ancestralStateTree(tree = phylogeny, ancestral_state_trace_vector = anc_states, include_start_states = false, file = output+".tree", burnin = 0.25, summary_statistic = "MAP", site = 1)
+writeNexus( anc_tree, filename = output+".tree" )
+
+## Model selection
+pow_p = powerPosterior(mymodel, moves, monitors, output+".out", cats = 50)
+pow_p.burnin(generations = 10000,tuningInterval = 1000)
+pow_p.run(generations = 1000)
+ss = steppingStoneSampler(file = output+".out", powerColumnName = "power", likelihoodColumnName = "likelihood")
+ss.marginal()
+
